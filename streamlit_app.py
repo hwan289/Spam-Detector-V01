@@ -18,15 +18,11 @@ import matplotlib.pyplot as plt
 from mtranslate import translate
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Spam Detection", layout="wide")
+st.set_page_config(page_title="AI Spam Detection", layout="wide")
 
-# --- CACHED RESOURCES (Prevents 502 Crashes) ---
+# --- CACHED RESOURCES ---
 @st.cache_resource
 def setup_nltk():
-    """
-    Download NLTK data once and cache it. 
-    Prevents repeated downloads that crash low-memory servers.
-    """
     try:
         nltk.data.find('tokenizers/punkt')
         nltk.data.find('corpora/stopwords')
@@ -36,20 +32,19 @@ def setup_nltk():
         nltk.download('stopwords')
         nltk.download('punkt_tab')
 
-# Initialize NLTK
 setup_nltk()
 
 # --- UTILS ---
-@st.cache_data
+@st.cache_data(max_entries=1)
 def process_dataframe(df, target_col):
     """
-    Heavy lifting: Filters, Translation, etc.
-    Cached by Streamlit for performance.
+    Optimized processing pipeline with memory safeguards.
     """
     processed_df = df.copy()
+    
+    # Initialize columns
     processed_df['Status'] = 'Non-Spam'
     processed_df['Reason'] = 'Valid'
-    # Initialize Translation as empty string
     processed_df['Translation'] = ""
     
     # 1. Filters (Vectorized)
@@ -66,27 +61,23 @@ def process_dataframe(df, target_col):
     processed_df.loc[url_mask, 'Status'] = 'Spam'
     processed_df.loc[url_mask, 'Reason'] = 'Contains URL'
     
-    # --- KEYWORD RULES ---
-    
-    # Crypto Check
+    # Crypto
     crypto_pattern = r'Cryptaxbot|bitcoin'
     crypto_mask = (processed_df['Status'] == 'Non-Spam') & text_series.str.contains(crypto_pattern, case=False, regex=True, na=False)
     processed_df.loc[crypto_mask, 'Status'] = 'Spam'
     processed_df.loc[crypto_mask, 'Reason'] = 'Crypto Keyword'
 
-    # Suspicious Keywords Check (Marijuana, Casino, Bots)
+    # Suspicious
     suspicious_pattern = r'marijuana|xevil|casino|captchas|recaptcha'
     suspicious_mask = (processed_df['Status'] == 'Non-Spam') & text_series.str.contains(suspicious_pattern, case=False, regex=True, na=False)
     processed_df.loc[suspicious_mask, 'Status'] = 'Spam'
     processed_df.loc[suspicious_mask, 'Reason'] = 'Suspicious Keyword'
 
-    # Email Check
+    # Email
     email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     email_mask = (processed_df['Status'] == 'Non-Spam') & text_series.str.contains(email_pattern, regex=True, na=False)
     processed_df.loc[email_mask, 'Status'] = 'Spam'
     processed_df.loc[email_mask, 'Reason'] = 'Contains Email'
-    
-    # ---------------------
     
     # Short
     short_mask = (processed_df['Status'] == 'Non-Spam') & (text_series.str.split().str.len() < 2)
@@ -101,13 +92,16 @@ def process_dataframe(df, target_col):
     processed_df.loc[sym_mask, 'Status'] = 'Spam'
     processed_df.loc[sym_mask, 'Reason'] = 'Excessive Symbols'
 
-    # 2. Translation (Parallel)
+    # Optimize types
+    processed_df['Status'] = processed_df['Status'].astype('category')
+    processed_df['Reason'] = processed_df['Reason'].astype('category')
+
+    # 2. Translation (Throttled)
     candidates_idx = processed_df[processed_df['Status'] == 'Non-Spam'].index
     to_translate = []
     
     for idx in candidates_idx:
         txt = str(processed_df.at[idx, target_col])
-        # Simple ASCII check
         if not all(ord(c) < 128 for c in txt if c.strip()):
             to_translate.append((idx, txt))
     
@@ -115,25 +109,27 @@ def process_dataframe(df, target_col):
         def do_trans(item):
             idx, txt = item
             try:
-                # Limit to 500 chars to save memory/time
-                return idx, translate(txt[:500], 'en')
+                return idx, translate(txt[:300], 'en')
             except:
                 return idx, None
 
-        # Reduced workers to 4 to save memory on Render Free Tier
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(do_trans, to_translate))
             
         for idx, trans in results:
             if trans:
                 processed_df.at[idx, 'Translation'] = trans
     
-    # Force memory cleanup
     gc.collect()
     return processed_df
 
 def get_topics(df_subset, target_col, n_topics=3):
     if df_subset.empty: return [], None
+    
+    # Sampling for speed/memory
+    if len(df_subset) > 2000:
+        df_subset = df_subset.sample(2000, random_state=42)
+    
     try:
         stop_words = set(stopwords.words('english'))
         clean_docs = []
@@ -157,37 +153,53 @@ def get_topics(df_subset, target_col, n_topics=3):
             top = [feature_names[i] for i in topic.argsort()[:-8:-1]]
             topics.append(", ".join(top))
             
-        # Generate WordCloud
         wc = WordCloud(width=800, height=300, background_color='white', max_words=100).generate(full_text)
+        
+        del vec, X, lda, clean_docs, full_text
+        gc.collect()
         
         return topics, wc
     except Exception as e:
         return [], None
 
 # --- MAIN APP UI ---
-st.title("🛡️ Spam Detection Dashboard")
+st.title("🛡️ AI Spam Detection Dashboard")
 
-uploaded_file = st.file_uploader("Upload CSV File", type=['csv'])
+with st.sidebar:
+    st.header("Upload Data")
+    uploaded_file = st.file_uploader("Choose a CSV file", type=['csv'])
+    if uploaded_file:
+        st.info(f"File Size: {uploaded_file.size / 1024 / 1024:.2f} MB")
 
 if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    cols = df.columns.tolist()
-    
-    target_col = st.selectbox("Select Text Column for Analysis", cols)
-    
-    if st.button("🚀 Run Analysis", type="primary"):
-        with st.spinner("Processing... Filtering, Translating, and Analyzing."):
-            st.cache_data.clear() 
-            processed_df = process_dataframe(df, target_col)
-            st.session_state['data'] = processed_df
-            st.session_state['target_col'] = target_col
-            st.success("Analysis Complete!")
+    try:
+        df = pd.read_csv(uploaded_file)
+        cols = df.columns.tolist()
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            target_col = st.selectbox("Select Text Column for Analysis", cols)
+        with col2:
+            st.write("") 
+            st.write("") 
+            run_btn = st.button("🚀 Run Analysis", type="primary", use_container_width=True)
+        
+        if run_btn:
+            with st.spinner("Processing..."):
+                st.cache_data.clear()
+                processed_df = process_dataframe(df, target_col)
+                st.session_state['data'] = processed_df
+                st.session_state['target_col'] = target_col
+                st.success("Analysis Complete!")
+                gc.collect()
+                
+    except Exception as e:
+        st.error(f"Error loading file: {e}")
 
 if 'data' in st.session_state:
     data = st.session_state['data']
     target_col = st.session_state['target_col']
     
-    # Tabs
     tab_review, tab_manual, tab_stats, tab_ns_topics, tab_s_topics = st.tabs([
         "📝 Review Non-Spam", 
         "🚩 Manually Flagged",
@@ -199,11 +211,9 @@ if 'data' in st.session_state:
     # --- TAB 1: Review ---
     with tab_review:
         st.markdown("#### Review Non-Spam Messages")
-        st.caption("Check the box to manually mark items as spam. Changes apply immediately.")
-        st.caption("💡 **Tip:** Double-click on any cell to expand and view the full text.")
+        st.caption("Tip: Double-click on any cell to view full text.")
         
         non_spam_df = data[data['Status'] == 'Non-Spam']
-        
         review_df = non_spam_df.copy()
         review_df['Mark as Spam'] = False
         
@@ -228,12 +238,11 @@ if 'data' in st.session_state:
                 st.session_state['data'].loc[to_mark, 'Reason'] = 'Manual User Mark'
                 st.success(f"Moved {len(to_mark)} items to Spam.")
                 st.rerun()
+            gc.collect()
 
     # --- TAB 2: Manually Flagged ---
     with tab_manual:
         st.markdown("#### Manage Manually Flagged Items")
-        st.caption("These items were manually marked as spam by you.")
-        
         manual_df = data[data['Reason'] == 'Manual User Mark']
         
         if not manual_df.empty:
@@ -263,28 +272,30 @@ if 'data' in st.session_state:
                     st.session_state['data'].loc[to_restore, 'Reason'] = 'Valid'
                     st.success(f"Restored {len(to_restore)} items.")
                     st.rerun()
+            gc.collect()
         else:
             st.info("No manually marked spam items found.")
 
     # --- TAB 3: Stats ---
     with tab_stats:
         col1, col2 = st.columns([2, 1])
-        
         spam_df = data[data['Status'] == 'Spam']
         counts = spam_df['Reason'].value_counts()
         
         with col1:
             st.subheader("Spam Categories Distribution")
             
-            # Fixed: Horizontal Bar Chart to prevent overlap and vertical text
-            fig, ax = plt.subplots(figsize=(8, 5))
-            counts.sort_values().plot(kind='barh', color='#FF4B4B', ax=ax)
-            
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-            plt.xlabel("Count")
-            plt.tight_layout()
-            st.pyplot(fig)
+            # --- FIXED: Check if data exists before plotting to avoid IndexError ---
+            if not counts.empty and counts.sum() > 0:
+                fig, ax = plt.subplots(figsize=(8, 5))
+                counts.sort_values().plot(kind='barh', color='#FF4B4B', ax=ax)
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                plt.xlabel("Count")
+                plt.tight_layout()
+                st.pyplot(fig)
+            else:
+                st.info("No spam detected yet. Charts will appear here once spam is found.")
             
         with col2:
             st.subheader("Summary")
@@ -293,10 +304,10 @@ if 'data' in st.session_state:
             st.metric("Total Records", total)
             st.metric("Spam Detected", f"{spam}", delta=f"{spam/total:.1%}", delta_color="inverse")
             st.metric("Clean Records", total - spam)
-            
             st.write("---")
             st.write("**Breakdown:**")
             st.dataframe(counts, use_container_width=True)
+        gc.collect()
 
     # --- TAB 4: Non-Spam Topics ---
     with tab_ns_topics:
@@ -306,15 +317,14 @@ if 'data' in st.session_state:
         ns_df = data[data['Status'] == 'Non-Spam']
         if not ns_df.empty:
             topics, wc = get_topics(ns_df, target_col, ns_topics_n)
-            
             if wc:
                 st.image(wc.to_array(), use_container_width=True, caption="Word Cloud (Non-Spam)")
-            
             if topics:
                 for i, t in enumerate(topics):
                     st.info(f"**Topic {i+1}:** {t}")
         else:
             st.warning("No data.")
+        gc.collect()
 
     # --- TAB 5: Spam Topics ---
     with tab_s_topics:
@@ -326,9 +336,9 @@ if 'data' in st.session_state:
             topics, wc = get_topics(s_df, target_col, s_topics_n)
             if wc:
                 st.image(wc.to_array(), use_container_width=True, caption="Word Cloud (Spam)")
-                
             if topics:
                 for i, t in enumerate(topics):
                     st.error(f"**Topic {i+1}:** {t}")
         else:
             st.warning("No spam data.")
+        gc.collect()
