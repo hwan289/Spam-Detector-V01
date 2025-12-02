@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+nltk
+scikit-learn
+wordcloud
+matplotlib
+mtranslate
+python-docx
