@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from mtranslate import translate
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="AI Spam Detection", layout="wide")
+st.set_page_config(page_title="Spam Detection", layout="wide")
 
 # --- CACHED RESOURCES ---
 @st.cache_resource
@@ -163,7 +163,7 @@ def get_topics(df_subset, target_col, n_topics=3):
         return [], None
 
 # --- MAIN APP UI ---
-st.title("🛡️ AI Spam Detection Dashboard")
+st.title("🛡️ Spam Detection Dashboard")
 
 with st.sidebar:
     st.header("Upload Data")
